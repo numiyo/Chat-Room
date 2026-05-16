@@ -20,7 +20,7 @@ MODEL_NAME = load_config("model.txt", "deepseek-v4-flash")   # 可以换deepseek
 
 # 机器人是否可用
 BOT_ENABLED = bool(API_KEY)
-BOT_NAME = "常用中文机器人名"
+BOT_NAME = "默认通用中文名"
 
 # 成本控制：最大回复 token 数
 MAX_BOT_TOKENS = 300
