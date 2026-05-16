@@ -17,7 +17,7 @@
 ## 项目结构
 
 ```Plain Text
-chat-room/
+Chat-Room/
 ├── app.py          # 主程序（FastAPI + WebSocket + 前端页面 + 机器人逻辑）
 ├── requirements.txt # Python 依赖包列表
 ├── update.sh       # 一键部署/更新脚本
@@ -32,8 +32,8 @@ chat-room/
 ### 1\. 克隆仓库
 
 ```bash
-git clone https://github.com/numiyo/chat-room.git
-cd chat-room
+git clone https://github.com/numiyo/Chat-Room.git
+cd Chat-Room
 ```
 
 ### 2\. 配置 API Key
