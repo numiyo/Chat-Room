@@ -18,17 +18,19 @@ API_KEY = load_config("api_key.txt")
 SYSTEM_PROMPT = load_config("prompt.txt", "你是一个友好、幽默的聊天助手，请用简短的中文回复。")
 MODEL_NAME = load_config("model.txt", "deepseek-v4-flash")   # 可以换deepseek-v4-pro
 
-# 机器人是否可用
 BOT_ENABLED = bool(API_KEY)
 BOT_NAME = "默认通用中文名"
-
-# 成本控制：最大回复 token 数
 MAX_BOT_TOKENS = 300
+
+# 上下文长度（保留最近 20 条消息，约 10 轮对话）
+MAX_HISTORY_LENGTH = 20
 
 # ---------- 连接管理器 ----------
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[WebSocket, str] = {}
+        self.chat_history = []                 # 全局对话历史
+        self.history_lock = asyncio.Lock()     # 异步锁，防止并发写入
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -58,8 +60,8 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# ---------- 调用 DeepSeek API ----------
-async def get_bot_reply(user_message: str, username: str) -> str | None:
+# ---------- 调用 DeepSeek API（带上下文）----------
+async def get_bot_reply(history: list) -> str | None:
     """异步获取机器人回复，失败返回 None"""
     if not BOT_ENABLED:
         return None
@@ -68,10 +70,8 @@ async def get_bot_reply(user_message: str, username: str) -> str | None:
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json"
     }
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"{username}: {user_message}"}
-    ]
+    # 将系统提示词 + 历史消息组合
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
     payload = {
         "model": MODEL_NAME,
         "messages": messages,
@@ -96,7 +96,7 @@ async def get_bot_reply(user_message: str, username: str) -> str | None:
         print(f"Bot request failed: {e}")
         return None
 
-# ---------- 前端页面 ----------
+# ---------- 前端页面（保持不变）----------
 @app.get("/", response_class=HTMLResponse)
 async def get():
     return HTMLResponse(content="""
@@ -189,7 +189,7 @@ async def get():
 </html>
 """)
 
-# ---------- WebSocket 端点 ----------
+# ---------- WebSocket 端点（增加历史记录）----------
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
@@ -198,15 +198,26 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_json()
             if data.get("type") == "chat":
                 username = manager.active_connections.get(websocket, "未知")
+                user_msg = data["message"]
                 # 广播用户消息
                 await manager.broadcast({
                     "type": "chat",
                     "username": username,
-                    "message": data["message"]
+                    "message": user_msg
                 })
 
-                # 异步调用机器人，不阻塞其他消息
-                asyncio.create_task(handle_bot_reply(data["message"], username))
+                # 将用户消息写入全局历史（加锁、修剪）
+                async with manager.history_lock:
+                    manager.chat_history.append({
+                        "role": "user",
+                        "content": f"{username}: {user_msg}"
+                    })
+                    if len(manager.chat_history) > MAX_HISTORY_LENGTH:
+                        manager.chat_history = manager.chat_history[-MAX_HISTORY_LENGTH:]
+
+                # 异步触发机器人，传入当前历史快照
+                history_snapshot = manager.chat_history.copy()
+                asyncio.create_task(handle_bot_reply(history_snapshot))
 
     except WebSocketDisconnect:
         username = manager.disconnect(websocket)
@@ -221,9 +232,9 @@ async def websocket_endpoint(websocket: WebSocket):
             "message": f"{username} 离开了聊天室"
         })
 
-async def handle_bot_reply(user_message: str, username: str):
-    """独立任务：获取机器人回复并广播"""
-    bot_reply = await get_bot_reply(user_message, username)
+async def handle_bot_reply(history_snapshot: list):
+    """独立任务：获取机器人回复并广播，同时写回历史"""
+    bot_reply = await get_bot_reply(history_snapshot)
     if bot_reply:
         await manager.broadcast({
             "type": "chat",
@@ -231,3 +242,11 @@ async def handle_bot_reply(user_message: str, username: str):
             "message": bot_reply,
             "isBot": True
         })
+        # 机器人回复也写入历史
+        async with manager.history_lock:
+            manager.chat_history.append({
+                "role": "assistant",
+                "content": bot_reply
+            })
+            if len(manager.chat_history) > MAX_HISTORY_LENGTH:
+                manager.chat_history = manager.chat_history[-MAX_HISTORY_LENGTH:]
